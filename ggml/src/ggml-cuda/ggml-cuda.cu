@@ -288,7 +288,13 @@ static ggml_cuda_device_info ggml_cuda_init() {
                       id, prop.name, prop.major, prop.minor, device_vmm ? "yes" : "no",
                       (size_t)(prop.totalGlobalMem / (1024 * 1024)));
 #else
-        info.devices[id].smpbo = prop.sharedMemPerBlockOptin;
+        // Sanity check: NVIDIA driver bug returns bogus 0x100000001 on SM120 with some CUDA 13.x drivers.
+        // Cap at 256 KB (no known GPU exceeds 228 KB shared mem per block).
+        if (prop.sharedMemPerBlockOptin > 256*1024) {
+            info.devices[id].smpbo = prop.sharedMemPerBlock;
+        } else {
+            info.devices[id].smpbo = prop.sharedMemPerBlockOptin;
+        }
         info.devices[id].cc = 100*prop.major + 10*prop.minor;
         GGML_LOG_INFO("  Device %d: %s, compute capability %d.%d, VMM: %s, VRAM: %zu MiB\n",
                       id, prop.name, prop.major, prop.minor, device_vmm ? "yes" : "no",

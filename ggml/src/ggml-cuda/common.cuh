@@ -233,7 +233,7 @@ static const char * cu_get_error_str(CUresult err) {
             static bool shared_memory_limit_raised[GGML_CUDA_MAX_DEVICES] = { false };                         \
             const int   id                                                = ggml_cuda_get_device();            \
             if (!shared_memory_limit_raised[id]) {                                                             \
-                CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, nbytes)); \
+                CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) (nbytes))); \
                 shared_memory_limit_raised[id] = true;                                                         \
             }                                                                                                  \
         } while (0)
