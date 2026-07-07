@@ -4,6 +4,7 @@
 #include "vecdotq.cuh"
 
 #include <cstdint>
+#include <cstdlib>
 
 typedef float (*vec_dot_q_cuda_t)(const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs);
 
@@ -748,8 +749,25 @@ template<ggml_type type>
 static std::pair<dim3, dim3> calc_launch_params(
         const int ncols_dst, const int nrows_x, const int nchannels_dst, const int nsamples_or_ntokens,
         const int warp_size, const mmvq_parameter_table_id table_id, const bool small_k = false) {
-    const int nwarps = calc_nwarps(type, ncols_dst, table_id);
-    const int rpb = calc_rows_per_block(ncols_dst, table_id, small_k, nwarps);
+    int nwarps = calc_nwarps(type, ncols_dst, table_id);
+    int rpb = calc_rows_per_block(ncols_dst, table_id, small_k, nwarps);
+
+    // Env var overrides for MMVQ benchmarking
+    const char* nwarps_env = getenv("LLAMA_MMVQ_NWARPS");
+    if (nwarps_env) {
+        int nw = atoi(nwarps_env);
+        if (nw >= 1 && nw <= nwarps) {
+            nwarps = nw;
+        }
+    }
+    const char* rpb_env = getenv("LLAMA_MMVQ_RPB");
+    if (rpb_env) {
+        int r = atoi(rpb_env);
+        if (r >= 1 && r <= 8) {
+            rpb = r;
+        }
+    }
+
     const int64_t nblocks = (nrows_x + rpb - 1) / rpb;
     const dim3 block_nums(nblocks, nchannels_dst, nsamples_or_ntokens);
     const dim3 block_dims(warp_size, nwarps, 1);
