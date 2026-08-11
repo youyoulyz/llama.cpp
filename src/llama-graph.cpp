@@ -1203,6 +1203,8 @@ void llm_graph_result::reset() {
     t_sampled_logits.clear();
     t_candidates.clear();
 
+    t_moe_experts.clear();
+
     params = {};
 
     inputs.clear();
@@ -1916,6 +1918,15 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         cb(selected_experts->src[0], "ffn_moe_argsort", il);
     }
     cb(selected_experts, "ffn_moe_topk", il);
+
+    // Record MoE expert selection for external inspection
+    // [n_expert_used, n_tokens] tensor of expert indices (i32)
+    {
+        char name[64];
+        snprintf(name, sizeof(name), "moe_selected_experts_%d", il);
+        ggml_set_name(selected_experts, name);
+        res->t_moe_experts.push_back(selected_experts);
+    }
 
     if (arch == LLM_ARCH_GROVEMOE && n_expert != hparams.n_expert) {
         // TODO: Use scalar div instead when/if implemented

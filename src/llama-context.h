@@ -90,6 +90,15 @@ struct llama_context {
 
     float * get_embeddings_layer_inp(uint32_t lid);
 
+    // MoE expert routing: get per-token expert indices for a specific layer
+    // returns pointer to [n_expert_used * n_tokens] i32 flat array, or nullptr if not available
+    const int32_t * get_moe_expert_indices(int32_t layer_idx) const;
+    int32_t get_moe_n_tokens() const { return moe_n_tokens; }
+    int32_t get_moe_n_expert_used() const { return moe_n_expert_used; }
+    int32_t get_moe_n_layers() const { return (int32_t)moe_expert_data.size(); }
+
+    friend bool llama_moe_eval_cb(ggml_tensor * t, bool ask, void * user_data);
+
     llama_token * get_sampled_tokens() const;
     llama_token   get_sampled_token_ith(int32_t idx);
 
@@ -303,6 +312,23 @@ private:
     // host buffers for output layer input embeddings, per layer
     // populated when cparams.output_layer_inp[il] is true
     std::vector<buffer_view<float>> embd_layer_inp;
+
+    // MoE expert routing data: per-layer per-token expert indices
+    // populated after decode when model has MoE layers
+    // moe_expert_data[layer_idx] = [n_expert_used * n_tokens] i32 flat array
+    std::vector<std::vector<int32_t>> moe_expert_data;
+
+    // Number of tokens in the most recent decode batch (for moe_expert_data layout)
+    int32_t moe_n_tokens = 0;
+    int32_t moe_n_expert_used = 0;
+
+    // MoE expert-selection capture via the scheduler eval callback.
+    // The callback reads each layer's expert indices right after that layer's
+    // argsort node computes (before the compute allocator can reuse the
+    // intermediate memory), so post-decode reads are per-layer correct.
+    void capture_moe_expert_layer(ggml_tensor * t);
+    ggml_backend_sched_eval_callback user_cb_eval = nullptr;
+    void * user_cb_eval_data = nullptr;
 
     struct sampling_info {
         // !samplers.empty() to check if any samplers are active

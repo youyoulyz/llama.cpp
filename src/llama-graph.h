@@ -840,6 +840,10 @@ public:
 
     std::vector<ggml_tensor *> t_layer_inp;
 
+    // MoE expert routing: one tensor per MoE layer with shape [n_expert_used, n_tokens]
+    // populated during graph build, data extracted after compute
+    std::vector<ggml_tensor *> t_moe_experts;
+
     std::map<llama_seq_id, ggml_tensor *> t_sampled_logits;
     std::map<llama_seq_id, ggml_tensor *> t_candidates;
     std::map<llama_seq_id, ggml_tensor *> t_sampled;

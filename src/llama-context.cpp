@@ -971,6 +971,16 @@ float * llama_context::get_embeddings_layer_inp(uint32_t lid) {
     return embd_layer_inp[lid].data;
 }
 
+const int32_t * llama_context::get_moe_expert_indices(int32_t layer_idx) const {
+    if (layer_idx < 0 || layer_idx >= (int32_t)moe_expert_data.size()) {
+        return nullptr;
+    }
+    if (moe_expert_data[layer_idx].empty()) {
+        return nullptr;
+    }
+    return moe_expert_data[layer_idx].data();
+}
+
 llama_token llama_context::get_sampled_token_ith(int32_t idx) {
     output_reorder();
 
@@ -1314,6 +1324,60 @@ bool llama_context::set_adapter_cvec(
     return res;
 }
 
+// scheduler eval-callback wrapper: captures per-layer MoE expert selections
+// right after each layer's argsort node computes, then forwards to the user's
+// callback (if any). Reading the tensor at this moment is safe because the
+// backend is synchronized before the (ask == false) invocation and the compute
+// allocator has not yet reused this intermediate's memory.
+bool llama_moe_eval_cb(ggml_tensor * t, bool ask, void * user_data) {
+    llama_context * ctx = static_cast<llama_context *>(user_data);
+    const bool is_moe = t && t->name && strncmp(t->name, "moe_selected_experts_", 21) == 0;
+    if (!ask) {
+        if (is_moe) {
+            ctx->capture_moe_expert_layer(t);
+        }
+        if (ctx->user_cb_eval) {
+            return ctx->user_cb_eval(t, ask, ctx->user_cb_eval_data);
+        }
+        return true;
+    }
+    // ask == true: report whether this node's data is needed (isolate it for
+    // capture). Everything else batches normally so decode stays fast.
+    if (ctx->user_cb_eval) {
+        return ctx->user_cb_eval(t, ask, ctx->user_cb_eval_data) || is_moe;
+    }
+    return is_moe;
+}
+
+void llama_context::capture_moe_expert_layer(ggml_tensor * t) {
+    const char * p = t->name + 21; // past "moe_selected_experts_"
+    char * end = nullptr;
+    long layer = strtol(p, &end, 10);
+    if (end == p || layer < 0 || layer >= 4096) {
+        return;
+    }
+    const int32_t n_exp = (int32_t) t->ne[0];
+    const int32_t n_tok = (int32_t) t->ne[1];
+    if ((size_t) layer >= moe_expert_data.size()) {
+        moe_expert_data.resize(layer + 1);
+    }
+    moe_expert_data[layer].resize((size_t) n_exp * (size_t) n_tok);
+    if (t->buffer && !moe_expert_data[layer].empty()) {
+        ggml_backend_tensor_get(t, moe_expert_data[layer].data(),
+                0, (size_t) n_exp * (size_t) n_tok * sizeof(int32_t));
+    }
+    moe_n_tokens      = n_tok;
+    moe_n_expert_used = n_exp;
+    if (getenv("MOE_DEBUG")) {
+        fprintf(stderr, "MOE_DBG layer=%ld name=%s tensor=%p data=%p n_exp=%d n_tok=%d v0=%d v1=%d v2=%d v3=%d\n",
+            layer, t->name, (void*) t, (void*) t->data, n_exp, n_tok,
+            moe_expert_data[layer].size() > 0 ? moe_expert_data[layer][0] : -1,
+            moe_expert_data[layer].size() > 1 ? moe_expert_data[layer][1] : -1,
+            moe_expert_data[layer].size() > 2 ? moe_expert_data[layer][2] : -1,
+            moe_expert_data[layer].size() > 3 ? moe_expert_data[layer][3] : -1);
+    }
+}
+
 llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, llm_graph_type gtype, llama_memory_context_i * mctx, ggml_status & ret) {
     if (mctx && !mctx->apply()) {
         LLAMA_LOG_ERROR("%s: failed to apply memory context\n", __func__);
@@ -1343,7 +1407,11 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         res->reset();
 
         ggml_backend_sched_reset(sched.get());
-        ggml_backend_sched_set_eval_callback(sched.get(), cparams.cb_eval, cparams.cb_eval_user_data);
+        // Install a wrapper around the user's eval callback that also captures
+        // per-layer MoE expert selections at compute time.
+        user_cb_eval      = cparams.cb_eval;
+        user_cb_eval_data = cparams.cb_eval_user_data;
+        ggml_backend_sched_set_eval_callback(sched.get(), llama_moe_eval_cb, this);
 
         //const auto t_start_us = ggml_time_us();
 
@@ -1362,6 +1430,11 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
             ret = GGML_STATUS_ALLOC_FAILED;
             return nullptr;
         }
+    }
+
+    // prepare MoE expert-selection storage (sized by the graph's MoE layer count)
+    if (!res->t_moe_experts.empty()) {
+        moe_expert_data.assign(res->t_moe_experts.size(), {});
     }
 
     // set the input data for the input tensors
@@ -3710,6 +3783,23 @@ float * llama_get_embeddings_seq(llama_context * ctx, llama_seq_id seq_id) {
     ctx->synchronize();
 
     return ctx->get_embeddings_seq(seq_id);
+}
+
+const int32_t * llama_get_moe_expert_indices(llama_context * ctx, int32_t layer_idx) {
+    ctx->synchronize();
+    return ctx->get_moe_expert_indices(layer_idx);
+}
+
+int32_t llama_get_moe_n_layers(llama_context * ctx) {
+    return ctx->get_moe_n_layers();
+}
+
+int32_t llama_get_moe_n_tokens(llama_context * ctx) {
+    return ctx->get_moe_n_tokens();
+}
+
+int32_t llama_get_moe_n_expert_used(llama_context * ctx) {
+    return ctx->get_moe_n_expert_used();
 }
 
 void llama_set_embeddings_nextn(llama_context * ctx, bool value, bool masked) {

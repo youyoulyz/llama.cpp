@@ -1040,6 +1040,21 @@ extern "C" {
     // returns NULL for invalid ids.
     LLAMA_API float * llama_get_embeddings_ith(struct llama_context * ctx, int32_t i);
 
+    // Get MoE expert routing data after decode
+    // Returns per-layer per-token expert indices for the most recent decode call.
+    // layer_idx: index of the MoE layer (0-based)
+    // Returns pointer to flat array of shape [n_expert_used * n_tokens] in row-major order
+    //   (expert indices 0..n_expert_used-1 for each token), or NULL if not available
+    // The data is valid until the next llama_decode call on the same context.
+    LLAMA_API const int32_t * llama_get_moe_expert_indices(struct llama_context * ctx, int32_t layer_idx);
+
+    // Get the number of MoE layers with captured expert routing data
+    LLAMA_API int32_t llama_get_moe_n_layers(struct llama_context * ctx);
+
+    // Get the number of tokens and experts-per-token in the captured data
+    LLAMA_API int32_t llama_get_moe_n_tokens      (struct llama_context * ctx);
+    LLAMA_API int32_t llama_get_moe_n_expert_used (struct llama_context * ctx);
+
     // Get the embeddings for a sequence id
     // Returns NULL if pooling_type is LLAMA_POOLING_TYPE_NONE
     // when pooling_type == LLAMA_POOLING_TYPE_RANK, returns float[n_cls_out] with the rank(s) of the sequence
