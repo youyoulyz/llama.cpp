@@ -11,6 +11,7 @@
 #include "sampling.h"
 
 #include "../src/llama-ext.h" // staging API: llama_set_embeddings_nextn / llama_get_embeddings_nextn_ith (used by MTP)
+#include "../src/llama-model.h" // complete llama_model type: DFlash draft gets local copies of the shared tok_embd/output
 
 #include <algorithm>
 #include <cassert>
@@ -2452,6 +2453,46 @@ common_speculative_init_result::common_speculative_init_result(
         model_path = params.speculative.draft.mparams.path;
         LOG_INF("%s: loading draft model '%s'\n", __func__, model_path.c_str());
 
+        // The DFlash/DSpark drafter is a small model with custom ops (grouped
+        // depthwise convolution, candidate selector) whose compute graph cannot be
+        // tensor (row) split: the meta backend asserts that the source axis of the
+        // per-row ops it uses is not GGML_BACKEND_SPLIT_AXIS_0. Tensor splitting the
+        // tiny drafter yields no speed benefit anyway, so when the user asks for
+        // -sm tensor (which the large target model uses for throughput) we split the
+        // drafter by LAYER instead. Layer splitting keeps each layer's activations
+        // whole (no axis-0 split), which avoids the assertion, while the target model
+        // keeps using -sm tensor.
+        if (mparams.split_mode == LLAMA_SPLIT_MODE_TENSOR) {
+            mparams.split_mode = LLAMA_SPLIT_MODE_LAYER;
+            LOG_INF("%s: forcing draft split_mode = LLAMA_SPLIT_MODE_LAYER to stay compatible with -sm tensor\n", __func__);
+
+            // the drafter is tiny (~2 GB) and fits on a single GPU, so pin it to the
+            // device with the most free memory (when the user did not pick one) to
+            // keep its per-decode cross-GPU copies at zero
+            if (params.speculative.draft.devices.empty()) {
+                ggml_backend_dev_t best_dev = nullptr;
+                size_t best_free = 0;
+                for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+                    ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+                    if (ggml_backend_dev_type(dev) != GGML_BACKEND_DEVICE_TYPE_GPU) {
+                        continue;
+                    }
+                    size_t free = 0, total = 0;
+                    ggml_backend_dev_memory(dev, &free, &total);
+                    if (free > best_free) {
+                        best_free = free;
+                        best_dev  = dev;
+                    }
+                }
+                if (best_dev != nullptr) {
+                    static ggml_backend_dev_t draft_devices[2] = { nullptr, nullptr };
+                    draft_devices[0] = best_dev;
+                    mparams.devices = draft_devices;
+                    LOG_INF("%s: pinning draft to a single device: %s\n", __func__, ggml_backend_dev_name(best_dev));
+                }
+            }
+        }
+
         llama_model * model_dft = llama_model_load_from_file(params.model.path.c_str(), mparams);
         if (model_dft == NULL) {
             LOG_ERR("%s: failed to load draft model, '%s'\n", __func__, model_path.c_str());
@@ -2459,6 +2500,20 @@ common_speculative_init_result::common_speculative_init_result(
         }
 
         pimpl->model.reset(model_dft);
+
+        // DFlash/DSpark drafts without their own token embedding / LM head share the target's
+        // via ctx_other. When the target is tensor-split (-sm tensor) those tensors live in a
+        // Meta() split buffer that the draft scheduler cannot run, so materialize unsplit local
+        // copies inside the draft model instead; the graph code prefers them over the borrow.
+        if (mparams.split_mode == LLAMA_SPLIT_MODE_LAYER && model_tgt != nullptr) {
+            if (model_dft->tok_embd == nullptr) {
+                model_dft->tok_embd = llama_model_copy_tensor_from(model_dft, model_tgt, "token_embd.weight");
+            }
+            if (model_dft->output == nullptr) {
+                model_dft->output   = llama_model_copy_tensor_from(model_dft, model_tgt, "output.weight");
+                model_dft->output_s = llama_model_copy_tensor_from(model_dft, model_tgt, "output.scale");
+            }
+        }
 
         llama_context * ctx_dft = llama_init_from_model(model_dft, cparams);
         if (ctx_dft == nullptr) {

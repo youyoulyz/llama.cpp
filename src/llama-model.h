@@ -721,6 +721,11 @@ struct llama_model {
 
     const struct ggml_tensor * get_tensor(const char * name) const;
 
+    // create a local copy of the tensor with the given name from `src` inside this model
+    // returns nullptr if `src` has no such tensor
+    // used by DFlash/DSpark drafts to own a copy of the target's token embedding / LM head
+    struct ggml_tensor * copy_tensor_from(const struct llama_model * src, const char * name);
+
     float get_rope_freq_base (const llama_cparams & cparams, int il) const;
     float get_rope_freq_scale(const llama_cparams & cparams, int il) const;
 

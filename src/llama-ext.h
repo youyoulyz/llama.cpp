@@ -130,3 +130,14 @@ LLAMA_API uint32_t        llama_model_target_layer_ids_n(const struct llama_mode
 // if out is nullptr, returns the number of tokens without writing to out
 // caller must allocate enough memory for out before calling
 LLAMA_API uint32_t llama_model_get_tok_embd(const struct llama_model * model, float * out);
+
+// Create a local copy of the tensor with the given name from model `src` inside model `dst`
+// and return it (nullptr when `src` has no such tensor). The copy is stored in a buffer owned
+// by `dst`: the token embedding on the CPU, everything else on the device of the output layer.
+// Used by DFlash/DSpark drafts that share the target's token embedding / LM head: under
+// -sm tensor the target's tensors live in a Meta() split buffer that the draft scheduler
+// cannot run, so the draft must own unsplit copies instead.
+LLAMA_API struct ggml_tensor * llama_model_copy_tensor_from(
+        struct llama_model * dst,
+        const struct llama_model * src,
+        const char * name);
