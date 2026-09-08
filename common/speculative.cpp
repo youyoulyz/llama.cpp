@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdio>
 #include <cstring>
 #include <iomanip>
 #include <map>
@@ -24,6 +25,42 @@
 #define SPC_WRN(fmt, ...) LOG_WRN("spec %12.*s: " fmt, 12, __func__, __VA_ARGS__)
 #define SPC_ERR(fmt, ...) LOG_ERR("spec %12.*s: " fmt, 12, __func__, __VA_ARGS__)
 #define SPC_CNT(fmt, ...) LOG_CNT(""              fmt,               __VA_ARGS__)
+
+// ---- moecho: spec trace to JSONL (LLAMA_SPEC_JSONL) ----
+// Writes one JSON per line: {"ev":"draft_done","seq":N,"t_us":...,"tokens":[...]}
+// and {"ev":"accept","seq":N,"t_us":...,"n":N}. Used by experiments/qwen38_flashnext_prereq_20260907 M2.
+static FILE * spec_ev_file = nullptr;
+static void spec_ev_open() {
+    if (spec_ev_file == nullptr) {
+        const char * p = getenv("LLAMA_SPEC_JSONL");
+        if (p && *p) {
+            spec_ev_file = fopen(p, "w");
+            if (spec_ev_file) {
+                setvbuf(spec_ev_file, nullptr, _IOLBF, 0);
+            }
+        }
+    }
+}
+static void spec_ev_draft_done(int seq, const std::vector<llama_token> & tokens) {
+    spec_ev_open();
+    if (!spec_ev_file) {
+        return;
+    }
+    fprintf(spec_ev_file, "{\"ev\":\"draft_done\",\"seq\":%d,\"t_us\":%" PRId64 ",\"tokens\":[",
+            seq, ggml_time_us());
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        fprintf(spec_ev_file, "%s%d", i ? "," : "", tokens[i]);
+    }
+    fprintf(spec_ev_file, "]}\n");
+}
+static void spec_ev_accept(int seq, int n_accepted) {
+    spec_ev_open();
+    if (!spec_ev_file) {
+        return;
+    }
+    fprintf(spec_ev_file, "{\"ev\":\"accept\",\"seq\":%d,\"t_us\":%" PRId64 ",\"n_accepted\":%d}\n",
+            seq, ggml_time_us(), n_accepted);
+}
 
 #define SPEC_VOCAB_MAX_SIZE_DIFFERENCE  128
 #define SPEC_VOCAB_CHECK_START_TOKEN_ID 5
@@ -2600,6 +2637,12 @@ void common_speculative_draft(common_speculative * spec) {
 
                     impl->n_gen_drafts++;
                     impl->n_gen_tokens += result.size();
+
+                    // moecho: emit draft_done trace event
+                    const bool is_mtp = impl->type == COMMON_SPECULATIVE_TYPE_DRAFT_MTP;
+                    if (is_mtp) {
+                        spec_ev_draft_done(seq_id, result);
+                    }
                 }
             }
 
@@ -2627,6 +2670,11 @@ void common_speculative_accept(common_speculative * spec, llama_seq_id seq_id, u
     common_speculative_impl * impl = spec->impl_last[seq_id];
 
     GGML_ASSERT(impl);
+
+    // moecho: emit accept trace event (MTP only)
+    if (impl->type == COMMON_SPECULATIVE_TYPE_DRAFT_MTP) {
+        spec_ev_accept(seq_id, n_accepted);
+    }
 
     {
         common_time_meas tm(impl->t_accept_us, !impl->gen_perf);
